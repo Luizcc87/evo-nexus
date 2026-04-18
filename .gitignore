@@ -108,3 +108,10 @@ site/lib/
 mempalace.yaml
 entities.json
 .claude/worktrees/
+
+# ── Local deploy and private docs ────────
+deploy/local/.env
+deploy/local/*.env
+deploy/local/*.override.yml
+deploy/local/*.secrets.yml
+docs/local/private/

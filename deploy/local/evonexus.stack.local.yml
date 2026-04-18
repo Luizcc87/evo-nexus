@@ -1,0 +1,146 @@
+## ============================================================================
+## Local Swarm stack variant for this fork.
+##
+## Purpose:
+## - customize image registry, tags, hostnames, and infrastructure names
+## - keep your operational values separate from the upstream baseline
+##
+## Naming rule:
+## - *.local.* = owned by your fork or your environment
+##
+## Expected topology:
+## - Cloudflare Tunnel -> Traefik -> EvoNexus
+## ============================================================================
+version: "3.7"
+
+services:
+
+  evonexus_dashboard:
+    image: luizcc87/evo-nexus-dashboard:2026.04.18
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_dashboard_data:/workspace/dashboard/data
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - traefik-public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - EVONEXUS_PORT=8080
+      - TERMINAL_SERVER_PORT=32352
+      - FORWARDED_ALLOW_IPS=*
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+      labels:
+        - traefik.enable=1
+        - traefik.docker.network=traefik-public
+
+        ## Replace with your real public hostname configured in Cloudflare.
+        - traefik.http.routers.evonexus_dashboard.rule=Host(`nexus.example.com`)
+        - traefik.http.routers.evonexus_dashboard.entrypoints=websecure
+        - traefik.http.routers.evonexus_dashboard.priority=1
+        - traefik.http.routers.evonexus_dashboard.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evonexus_dashboard.service=evonexus_dashboard
+        - traefik.http.services.evonexus_dashboard.loadbalancer.server.port=8080
+        - traefik.http.services.evonexus_dashboard.loadbalancer.passHostHeader=true
+
+        ## Terminal endpoint used by the embedded dashboard terminal.
+        - traefik.http.routers.evonexus_terminal.rule=Host(`nexus.example.com`) && PathPrefix(`/terminal`)
+        - traefik.http.routers.evonexus_terminal.entrypoints=websecure
+        - traefik.http.routers.evonexus_terminal.priority=10
+        - traefik.http.routers.evonexus_terminal.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evonexus_terminal.service=evonexus_terminal
+        - traefik.http.routers.evonexus_terminal.middlewares=evonexus_terminal_strip
+        - traefik.http.middlewares.evonexus_terminal_strip.stripprefix.prefixes=/terminal
+        - traefik.http.services.evonexus_terminal.loadbalancer.server.port=32352
+        - traefik.http.services.evonexus_terminal.loadbalancer.passHostHeader=true
+
+  evonexus_telegram:
+    image: luizcc87/evo-nexus-runtime:2026.04.18
+    command:
+      - "claude"
+      - "--channels"
+      - "plugin:telegram@claude-plugins-official"
+      - "--dangerously-skip-permissions"
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - traefik-public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - REQUIRE_ANTHROPIC_KEY=1
+
+    stdin_open: true
+    tty: true
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+
+  evonexus_scheduler:
+    image: luizcc87/evo-nexus-runtime:2026.04.18
+    command: ["uv", "run", "python", "scheduler.py"]
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - traefik-public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - REQUIRE_ANTHROPIC_KEY=1
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+
+volumes:
+  evonexus_config:
+  evonexus_workspace:
+  evonexus_dashboard_data:
+  evonexus_memory:
+  evonexus_adw_logs:
+  evonexus_agent_memory:
+  evonexus_codex_auth:
+
+networks:
+  traefik-public:
+    external: true
+    name: traefik-public

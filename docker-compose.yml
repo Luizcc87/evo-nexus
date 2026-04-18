@@ -7,21 +7,19 @@ services:
     container_name: evonexus-dashboard
     ports:
       - "${EVONEXUS_PORT:-8080}:8080"
+      - "32352:32352"
     env_file: .env
     environment:
       - TZ=America/Sao_Paulo
       - EVONEXUS_PORT=8080
     volumes:
       - ./.env:/workspace/.env:ro
-      - ./config:/workspace/config:ro
+      - ./config:/workspace/config
       - ./workspace:/workspace/workspace
-      - ./dashboard/data:/workspace/dashboard/data
-      - ./.claude/agents:/workspace/.claude/agents:ro
-      - ./.claude/skills:/workspace/.claude/skills:ro
-      - ./.claude/commands:/workspace/.claude/commands:ro
-      - ./.claude/templates:/workspace/.claude/templates:ro
-      - ./memory:/workspace/memory:ro
-      - ./ADWs/logs:/workspace/ADWs/logs:ro
+      - ./dashboard:/workspace/dashboard
+      - /workspace/dashboard/terminal-server/node_modules
+      - ./memory:/workspace/memory
+      - ./ADWs/logs:/workspace/ADWs/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/version"]
@@ -34,8 +32,7 @@ services:
   telegram:
     build: .
     container_name: evonexus-telegram
-    entrypoint: ["claude"]
-    command: ["--channels", "plugin:telegram@claude-plugins-official", "--dangerously-skip-permissions"]
+    command: claude --channels plugin:telegram@claude-plugins-official
     env_file: .env
     environment:
       - TZ=America/Sao_Paulo

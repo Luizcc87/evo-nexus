@@ -53,6 +53,10 @@ ALLOWED_ENV_VARS = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "CLOUD_ML_REGION",
+    # Zhipu AI (z.ai)
+    "CLAUDE_CODE_USE_ZAI",
+    "ZAI_API_KEY",
+    "ZAI_MODEL",
 })
 
 
@@ -650,6 +654,21 @@ _CODEX_ALIASES = [
         "id": "codexspark",
         "description": "GPT-5.3 Codex Spark (mais rápido, mais barato)",
         "description_en": "GPT-5.3 Codex Spark (faster, cheaper)",
+    },
+    {
+        "id": "codexturbo",
+        "description": "GPT-4o Codex Turbo (versátil e rápido)",
+        "description_en": "GPT-4o Codex Turbo (versatile and fast)",
+    },
+    {
+        "id": "codexmini",
+        "description": "GPT-4o-mini Codex (super rápido e leve)",
+        "description_en": "GPT-4o-mini Codex (super fast and lightweight)",
+    },
+    {
+        "id": "codex-o3",
+        "description": "O3 Codex Reasoning (raciocínio extremo)",
+        "description_en": "O3 Codex Reasoning (extreme reasoning)",
     },
 ]
 

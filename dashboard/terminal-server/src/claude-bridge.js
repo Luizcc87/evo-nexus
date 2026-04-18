@@ -24,6 +24,7 @@ class ClaudeBridge {
       'GEMINI_API_KEY', 'GEMINI_MODEL',
       'AWS_REGION', 'AWS_BEARER_TOKEN_BEDROCK',
       'ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION',
+      'CLAUDE_CODE_USE_ZAI', 'ZAI_API_KEY', 'ZAI_MODEL',
     ]);
 
     try {

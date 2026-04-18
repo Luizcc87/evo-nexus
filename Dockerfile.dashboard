@@ -19,7 +19,16 @@ FROM python:3.12-slim AS runtime
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ca-certificates \
+    git \
+    build-essential \
+    python3 \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Install AI CLIs (required for dashboard terminal & status check)
+RUN npm install -g @anthropic-ai/claude-code @gitlawb/openclaude@latest
 
 # Install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -37,6 +46,9 @@ RUN uv venv .venv && uv sync --no-dev
 
 # Copy backend code
 COPY dashboard/backend/ dashboard/backend/
+COPY dashboard/terminal-server/ dashboard/terminal-server/
+RUN cd dashboard/terminal-server && npm install
+COPY dashboard/docker-start.sh dashboard/docker-start.sh
 COPY social-auth/ social-auth/
 COPY scheduler.py ./
 
@@ -49,9 +61,13 @@ COPY --from=frontend-build /frontend/dist dashboard/frontend/dist
 # Create data directory for SQLite
 RUN mkdir -p dashboard/data
 
-# Default port
+# Default ports
 ENV EVONEXUS_PORT=8080
 EXPOSE 8080
+EXPOSE 32352
 
-# Run Flask app via uv
-CMD ["uv", "run", "python", "dashboard/backend/app.py"]
+# Make start script executable
+RUN chmod +x dashboard/docker-start.sh
+
+# Run services via startup script
+CMD ["./dashboard/docker-start.sh"]

@@ -39,6 +39,17 @@ docker buildx use evo-multiarch
 docker buildx inspect --bootstrap
 ```
 
+## Shell: Bash vs PowerShell
+
+Os exemplos com `\` no fim da linha funcionam em shells estilo Bash.
+
+No PowerShell:
+
+- use o comando em uma única linha
+- ou use crase `` ` `` para continuação de linha
+
+Não use `\` como continuação de linha no PowerShell.
+
 ## Publicar uma nova versão
 
 Exemplo com a tag `2026.04.18`.
@@ -55,6 +66,24 @@ docker buildx build \
   .
 ```
 
+PowerShell em uma linha:
+
+```powershell
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.swarm -t luizcc87/evo-nexus-runtime:2026.04.18 -t luizcc87/evo-nexus-runtime:latest --push .
+```
+
+PowerShell com continuação de linha:
+
+```powershell
+docker buildx build `
+  --platform linux/amd64,linux/arm64 `
+  -f Dockerfile.swarm `
+  -t luizcc87/evo-nexus-runtime:2026.04.18 `
+  -t luizcc87/evo-nexus-runtime:latest `
+  --push `
+  .
+```
+
 ### Dashboard
 
 ```bash
@@ -64,6 +93,24 @@ docker buildx build \
   -t luizcc87/evo-nexus-dashboard:2026.04.18 \
   -t luizcc87/evo-nexus-dashboard:latest \
   --push \
+  .
+```
+
+PowerShell em uma linha:
+
+```powershell
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.swarm.dashboard -t luizcc87/evo-nexus-dashboard:2026.04.18 -t luizcc87/evo-nexus-dashboard:latest --push .
+```
+
+PowerShell com continuação de linha:
+
+```powershell
+docker buildx build `
+  --platform linux/amd64,linux/arm64 `
+  -f Dockerfile.swarm.dashboard `
+  -t luizcc87/evo-nexus-dashboard:2026.04.18 `
+  -t luizcc87/evo-nexus-dashboard:latest `
+  --push `
   .
 ```
 

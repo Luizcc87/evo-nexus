@@ -1,0 +1,255 @@
+## ============================================================================
+## EvoNexus — Portainer / Docker Swarm stack
+## Versioned local variant for deploy with:
+## - Docker Swarm
+## - Portainer
+## - Traefik
+## - Cloudflare Tunnel in front of Traefik
+##
+## Before deploy:
+## - replace nexus.example.com with your real hostname
+## - fill the credential values below
+## - confirm the Traefik certresolver name
+## - in Cloudflare Tunnel, point the same hostname to Traefik
+##   example: nexus.example.com -> http://localhost:80
+## ============================================================================
+version: "3.7"
+
+services:
+
+  evonexus_dashboard:
+    image: lc1868/evo-nexus-dashboard:2026.04.18
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_dashboard_data:/workspace/dashboard/data
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - network_swarm_public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - EVONEXUS_PORT=8080
+      - TERMINAL_SERVER_PORT=32352
+      - FORWARDED_ALLOW_IPS=*
+      - DASHBOARD_API_TOKEN=
+      - DASHBOARD_API_USER=
+      - OMIE_APP_KEY=
+      - OMIE_APP_SECRET=
+      - BLING_CLIENT_ID=
+      - BLING_CLIENT_SECRET=
+      - BLING_ACCESS_TOKEN=
+      - BLING_REFRESH_TOKEN=
+      - ASAAS_API_KEY=
+      - ASAAS_SANDBOX=true
+      - STRIPE_SECRET_KEY=
+      - TODOIST_API_TOKEN=
+      - FATHOM_API_KEY=
+      - DISCORD_BOT_TOKEN=
+      - DISCORD_GUILD_ID=
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - YOUTUBE_OAUTH_CLIENT_ID=
+      - YOUTUBE_OAUTH_CLIENT_SECRET=
+      - META_APP_ID=
+      - META_APP_SECRET=
+      - LINKEDIN_CLIENT_ID=
+      - LINKEDIN_CLIENT_SECRET=
+      - EVOLUTION_API_URL=
+      - EVOLUTION_API_KEY=
+      - EVOLUTION_GO_URL=
+      - EVOLUTION_GO_KEY=
+      - EVO_CRM_URL=
+      - EVO_CRM_TOKEN=
+      - BACKUP_S3_BUCKET=
+      - BACKUP_S3_PREFIX=evonexus-backups/
+      - AI_IMG_CREATOR_CF_ACCOUNT_ID=
+      - AI_IMG_CREATOR_CF_GATEWAY_ID=
+      - AI_IMG_CREATOR_CF_TOKEN=
+      - AI_IMG_CREATOR_OPENROUTER_KEY=
+      - AI_IMG_CREATOR_GEMINI_KEY=
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+      labels:
+        - traefik.enable=1
+        - traefik.docker.network=network_swarm_public
+        ## Public route:
+        ##   https://nexus.example.com            -> dashboard on :8080
+        ##   https://nexus.example.com/terminal   -> terminal on :32352
+        - traefik.http.routers.evonexus_dashboard.rule=Host(`nexus.example.com`)
+        - traefik.http.routers.evonexus_dashboard.entrypoints=websecure
+        - traefik.http.routers.evonexus_dashboard.priority=1
+        - traefik.http.routers.evonexus_dashboard.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evonexus_dashboard.service=evonexus_dashboard
+        - traefik.http.services.evonexus_dashboard.loadbalancer.server.port=8080
+        - traefik.http.services.evonexus_dashboard.loadbalancer.passHostHeader=true
+        - traefik.http.routers.evonexus_terminal.rule=Host(`nexus.example.com`) && PathPrefix(`/terminal`)
+        - traefik.http.routers.evonexus_terminal.entrypoints=websecure
+        - traefik.http.routers.evonexus_terminal.priority=10
+        - traefik.http.routers.evonexus_terminal.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evonexus_terminal.service=evonexus_terminal
+        - traefik.http.routers.evonexus_terminal.middlewares=evonexus_terminal_strip
+        - traefik.http.middlewares.evonexus_terminal_strip.stripprefix.prefixes=/terminal
+        - traefik.http.services.evonexus_terminal.loadbalancer.server.port=32352
+        - traefik.http.services.evonexus_terminal.loadbalancer.passHostHeader=true
+
+  evonexus_telegram:
+    image: lc1868/evo-nexus-runtime:2026.04.18
+    command:
+      - "claude"
+      - "--channels"
+      - "plugin:telegram@claude-plugins-official"
+      - "--dangerously-skip-permissions"
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - network_swarm_public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - REQUIRE_ANTHROPIC_KEY=1
+      - DASHBOARD_API_TOKEN=
+      - DASHBOARD_API_USER=
+      - OMIE_APP_KEY=
+      - OMIE_APP_SECRET=
+      - BLING_CLIENT_ID=
+      - BLING_CLIENT_SECRET=
+      - BLING_ACCESS_TOKEN=
+      - BLING_REFRESH_TOKEN=
+      - ASAAS_API_KEY=
+      - ASAAS_SANDBOX=true
+      - STRIPE_SECRET_KEY=
+      - TODOIST_API_TOKEN=
+      - FATHOM_API_KEY=
+      - DISCORD_BOT_TOKEN=
+      - DISCORD_GUILD_ID=
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - YOUTUBE_OAUTH_CLIENT_ID=
+      - YOUTUBE_OAUTH_CLIENT_SECRET=
+      - META_APP_ID=
+      - META_APP_SECRET=
+      - LINKEDIN_CLIENT_ID=
+      - LINKEDIN_CLIENT_SECRET=
+      - EVOLUTION_API_URL=
+      - EVOLUTION_API_KEY=
+      - EVOLUTION_GO_URL=
+      - EVOLUTION_GO_KEY=
+      - EVO_CRM_URL=
+      - EVO_CRM_TOKEN=
+      - BACKUP_S3_BUCKET=
+      - BACKUP_S3_PREFIX=evonexus-backups/
+      - AI_IMG_CREATOR_CF_ACCOUNT_ID=
+      - AI_IMG_CREATOR_CF_GATEWAY_ID=
+      - AI_IMG_CREATOR_CF_TOKEN=
+      - AI_IMG_CREATOR_OPENROUTER_KEY=
+      - AI_IMG_CREATOR_GEMINI_KEY=
+
+    stdin_open: true
+    tty: true
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+
+  evonexus_scheduler:
+    image: lc1868/evo-nexus-runtime:2026.04.18
+    command: ["uv", "run", "python", "scheduler.py"]
+
+    volumes:
+      - evonexus_config:/workspace/config
+      - evonexus_workspace:/workspace/workspace
+      - evonexus_memory:/workspace/memory
+      - evonexus_adw_logs:/workspace/ADWs/logs
+      - evonexus_agent_memory:/workspace/.claude/agent-memory
+      - evonexus_codex_auth:/root/.codex
+
+    networks:
+      - network_swarm_public
+
+    environment:
+      - TZ=America/Sao_Paulo
+      - REQUIRE_ANTHROPIC_KEY=1
+      - DASHBOARD_API_TOKEN=
+      - DASHBOARD_API_USER=
+      - OMIE_APP_KEY=
+      - OMIE_APP_SECRET=
+      - BLING_CLIENT_ID=
+      - BLING_CLIENT_SECRET=
+      - BLING_ACCESS_TOKEN=
+      - BLING_REFRESH_TOKEN=
+      - ASAAS_API_KEY=
+      - ASAAS_SANDBOX=true
+      - STRIPE_SECRET_KEY=
+      - TODOIST_API_TOKEN=
+      - FATHOM_API_KEY=
+      - DISCORD_BOT_TOKEN=
+      - DISCORD_GUILD_ID=
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - YOUTUBE_OAUTH_CLIENT_ID=
+      - YOUTUBE_OAUTH_CLIENT_SECRET=
+      - META_APP_ID=
+      - META_APP_SECRET=
+      - LINKEDIN_CLIENT_ID=
+      - LINKEDIN_CLIENT_SECRET=
+      - EVOLUTION_API_URL=
+      - EVOLUTION_API_KEY=
+      - EVOLUTION_GO_URL=
+      - EVOLUTION_GO_KEY=
+      - EVO_CRM_URL=
+      - EVO_CRM_TOKEN=
+      - BACKUP_S3_BUCKET=
+      - BACKUP_S3_PREFIX=evonexus-backups/
+      - AI_IMG_CREATOR_CF_ACCOUNT_ID=
+      - AI_IMG_CREATOR_CF_GATEWAY_ID=
+      - AI_IMG_CREATOR_CF_TOKEN=
+      - AI_IMG_CREATOR_OPENROUTER_KEY=
+      - AI_IMG_CREATOR_GEMINI_KEY=
+
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+
+volumes:
+  evonexus_config:
+  evonexus_workspace:
+  evonexus_dashboard_data:
+  evonexus_memory:
+  evonexus_adw_logs:
+  evonexus_agent_memory:
+  evonexus_codex_auth:
+
+networks:
+  network_swarm_public:
+    external: true
+    name: network_swarm_public

@@ -29,8 +29,8 @@ No Cloudflare Tunnel, portanto, não é necessário criar um hostname separado p
 Crie um public hostname:
 
 - Hostname: `nexus.seudominio.com`
-- Service type: `HTTP`
-- URL de destino: o endpoint do Traefik na VPS
+- Path: deixe vazio
+- Service: aponte para o Traefik, não para `evonexus_dashboard`
 
 ## Destinos mais comuns
 
@@ -45,6 +45,38 @@ Se quiser passar por HTTPS interno e o Traefik publica 443:
 Se `cloudflared` roda como container e alcança o serviço Traefik pela rede Docker:
 
 - `http://traefik:80`
+
+## Configuração validada neste ambiente
+
+No ambiente `evonexus.l2csolucoes.com.br`, a configuração funcional ficou assim:
+
+- Hostname: `evonexus.l2csolucoes.com.br`
+- Path: vazio
+- Service type: `HTTPS`
+- Service URL: `traefik:443`
+
+Em **Additional application settings** / **HTTP Settings**:
+
+- `No TLS Verify`: `ON`
+- `HTTP Host Header`: `evonexus.l2csolucoes.com.br`
+
+Se o painel expuser um campo de SNI / origin server name, use também:
+
+- `evonexus.l2csolucoes.com.br`
+
+## O que não fazer
+
+Não use para o hostname do EvoNexus:
+
+- `evonexus_dashboard:8080`
+- `evonexus_dashboard:32352`
+- um path separado `/terminal`
+
+Essas opções fazem o dashboard abrir, mas quebram o terminal com:
+
+- `405 Method Not Allowed`
+- falha em `wss://.../terminal/ws`
+- mensagem `Could not reach terminal-server`
 
 ## Paths
 
@@ -87,6 +119,7 @@ Confirme também:
 Cadastre no Cloudflare apenas:
 
 - `nexus.seudominio.com` -> Traefik
+- preferencialmente `HTTPS -> traefik:443` com `No TLS Verify`
 
 E deixe o Traefik resolver internamente:
 

@@ -6,6 +6,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const {
+  loadProviderConfig,
+  resolveProviderModel,
+} = require('./provider-config');
 let sdkModule = null;
 
 // Workspace root is three levels up from this file (dashboard/terminal-server/src/).
@@ -44,7 +48,10 @@ const NEEDS_APPROVAL = new Set([
  * Extracts YAML frontmatter for metadata and the body as the prompt.
  */
 function loadAgentFile(agentName, cwd) {
-  const agentPath = path.join(cwd, '.claude', 'agents', `${agentName}.md`);
+  // Agent definitions live at the workspace root — cwd varies per ticket session.
+  const rootPath = path.join(WORKSPACE_ROOT, '.claude', 'agents', `${agentName}.md`);
+  const cwdPath = path.join(cwd, '.claude', 'agents', `${agentName}.md`);
+  const agentPath = fs.existsSync(rootPath) ? rootPath : cwdPath;
   if (!fs.existsSync(agentPath)) {
     console.warn(`[chat-bridge] Agent file not found: ${agentPath}`);
     return null;
@@ -94,6 +101,60 @@ async function loadSDK() {
     sdkModule = await import('@anthropic-ai/claude-agent-sdk');
   }
   return sdkModule;
+}
+
+/**
+ * Resolve the Claude Code native binary path, working around a bug in
+ * @anthropic-ai/claude-agent-sdk where Linux auto-discovery tries the
+ * `-musl` variant before glibc regardless of the host's actual libc.
+ * On glibc hosts with both packages installed, the SDK picks the musl
+ * binary, which fails to spawn because its dynamic loader is absent.
+ * See https://github.com/anthropics/claude-agent-sdk-typescript/issues/296
+ *
+ * Resolution order:
+ *   1. CLAUDE_CODE_EXECUTABLE env var (explicit override)
+ *   2. Platform-specific sibling package under node_modules, preferring the
+ *      libc variant that matches this host (glibc → no suffix; musl → -musl)
+ *   3. null → fall back to the SDK's own (buggy) discovery
+ */
+let _claudeExecutablePath = undefined;
+function resolveClaudeExecutable() {
+  if (_claudeExecutablePath !== undefined) return _claudeExecutablePath;
+
+  const envPath = process.env.CLAUDE_CODE_EXECUTABLE;
+  if (envPath && fs.existsSync(envPath)) {
+    console.log(`[chat-bridge] Using CLAUDE_CODE_EXECUTABLE=${envPath}`);
+    _claudeExecutablePath = envPath;
+    return _claudeExecutablePath;
+  }
+
+  const { platform, arch } = process;
+  const suffix = platform === 'win32' ? '.exe' : '';
+  const isMusl = platform === 'linux' && (() => {
+    try {
+      return fs.readdirSync('/lib').some((f) => f.startsWith('ld-musl-'))
+          || fs.readdirSync('/usr/lib').some((f) => f.startsWith('ld-musl-'));
+    } catch { return false; }
+  })();
+
+  const candidates = platform === 'linux'
+    ? (isMusl
+        ? [`claude-agent-sdk-linux-${arch}-musl`, `claude-agent-sdk-linux-${arch}`]
+        : [`claude-agent-sdk-linux-${arch}`, `claude-agent-sdk-linux-${arch}-musl`])
+    : [`claude-agent-sdk-${platform}-${arch}`];
+
+  for (const pkg of candidates) {
+    try {
+      const p = require.resolve(`@anthropic-ai/${pkg}/claude${suffix}`);
+      console.log(`[chat-bridge] Resolved Claude binary: ${p} (libc: ${isMusl ? 'musl' : 'glibc'})`);
+      _claudeExecutablePath = p;
+      return _claudeExecutablePath;
+    } catch { /* try next */ }
+  }
+
+  console.warn('[chat-bridge] Could not resolve Claude binary; letting SDK auto-discover');
+  _claudeExecutablePath = null;
+  return _claudeExecutablePath;
 }
 
 /**
@@ -182,19 +243,176 @@ class ChatBridge {
     this.sessions = new Map(); // sessionId -> { query, abortController, active, sdkSessionId }
   }
 
-  async startSession(sessionId, options = {}) {
-    const { query: sdkQuery } = await loadSDK();
+  _buildChatCompletionSystemPrompt(agentName, cwd, sessionId) {
+    const lines = [
+      'You are running inside EvoNexus dashboard chat.',
+      `Current chat session id: ${sessionId}`,
+    ];
+    if (agentName) lines.push(`Current agent slug: ${agentName}`);
+    if (agentName) {
+      const agentDef = loadAgentFile(agentName, cwd);
+      if (agentDef?.prompt) {
+        lines.push('');
+        lines.push('Follow this agent persona strictly:');
+        lines.push(agentDef.prompt);
+      }
+    }
+    lines.push('');
+    lines.push('If this model does not support tool calling, answer directly with best effort.');
+    return lines.join('\n');
+  }
 
+  _extractChatDeltaText(delta) {
+    if (!delta) return '';
+    if (typeof delta.content === 'string') return delta.content;
+    if (Array.isArray(delta.content)) {
+      return delta.content
+        .map((part) => (part?.type === 'text' ? part.text || '' : ''))
+        .join('');
+    }
+    if (typeof delta.reasoning === 'string') return delta.reasoning;
+    return '';
+  }
+
+  async _startOpenAICompatibleSession(sessionId, options, providerConfig) {
+    const {
+      agentName,
+      workingDir,
+      prompt,
+      files,
+      onMessage,
+      onError,
+      onComplete,
+    } = options;
+
+    if (this.sessions.has(sessionId)) {
+      await this.stopSession(sessionId);
+    }
+
+    const abortController = new AbortController();
+    const cwd = workingDir || process.cwd();
+    const env = providerConfig.env_vars || {};
+    const model = resolveProviderModel(providerConfig);
+    const baseUrl = (env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const apiKey = env.OPENAI_API_KEY || env.CODEX_API_KEY || '';
+
+    if (!model) {
+      throw new Error(`Provider "${providerConfig.active}" sem modelo configurado. Defina o campo Model em Providers.`);
+    }
+    if (!apiKey) {
+      throw new Error(`Provider "${providerConfig.active}" sem API key configurada para Chat Completion.`);
+    }
+
+    const runtimePrompt = this._buildChatCompletionSystemPrompt(agentName, cwd, sessionId);
+
+    let finalPrompt = prompt || '';
+    if (files && files.length > 0) {
+      const names = files.map((f) => `- ${f.name}`).join('\n');
+      finalPrompt += `\n\n[Attached files]\n${names}\n`;
+    }
+
+    const session = { active: true, abortController, sdkSessionId: null };
+    this.sessions.set(sessionId, session);
+
+    (async () => {
+      try {
+        const resp = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            stream: true,
+            messages: [
+              { role: 'system', content: runtimePrompt },
+              { role: 'user', content: finalPrompt },
+            ],
+          }),
+          signal: abortController.signal,
+        });
+
+        if (!resp.ok || !resp.body) {
+          const body = await resp.text().catch(() => '');
+          throw new Error(`Chat Completion falhou (${resp.status}): ${body.slice(0, 240)}`);
+        }
+
+        if (onMessage) {
+          onMessage({ type: 'message_start' });
+          onMessage({ type: 'text_start' });
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (session.active) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') continue;
+            let parsed;
+            try {
+              parsed = JSON.parse(payload);
+            } catch {
+              continue;
+            }
+            const delta = parsed?.choices?.[0]?.delta || {};
+            const text = this._extractChatDeltaText(delta);
+            if (text && onMessage) {
+              onMessage({ type: 'text_delta', text });
+            }
+          }
+        }
+
+        if (onMessage) {
+          onMessage({ type: 'message_stop' });
+          onMessage({ type: 'result', subtype: 'success', isError: false });
+        }
+        session.active = false;
+        this.sessions.delete(sessionId);
+        if (onComplete) onComplete({ sdkSessionId: null });
+      } catch (err) {
+        session.active = false;
+        this.sessions.delete(sessionId);
+        if (err.name === 'AbortError') {
+          if (onComplete) onComplete({ sdkSessionId: null });
+        } else if (onError) {
+          onError(err);
+        }
+      }
+    })();
+
+    return { sessionId, sdkSessionId: null };
+  }
+
+  async startSession(sessionId, options = {}) {
     const {
       agentName,
       workingDir,
       prompt,
       files,
       sdkSessionId,
+      systemPromptExtras,
       onMessage,
       onError,
       onComplete,
     } = options;
+
+    const providerConfig = loadProviderConfig();
+    if (providerConfig.active !== 'anthropic') {
+      return this._startOpenAICompatibleSession(sessionId, options, providerConfig);
+    }
+
+    const { query: sdkQuery } = await loadSDK();
 
     if (this.sessions.has(sessionId)) {
       await this.stopSession(sessionId);
@@ -207,6 +425,9 @@ class ChatBridge {
       includePartialMessages: true,
       abortController,
     };
+
+    const claudeExe = resolveClaudeExecutable();
+    if (claudeExe) queryOptions.pathToClaudeCodeExecutable = claudeExe;
 
     // Load agent definition from .claude/agents/{name}.md
     if (agentName) {
@@ -230,11 +451,17 @@ class ChatBridge {
 
         const runtimeBlock = runtimeLines.join('\n');
 
-        // Use systemPrompt with claude_code preset + agent prompt appended
+        // Use systemPrompt with claude_code preset + agent prompt appended.
+        // systemPromptExtras (e.g. thread memory.md content) is only injected on
+        // fresh sessions — when resuming, the context is already in the conversation.
+        let promptAppend = agentDef.prompt + '\n\n' + runtimeBlock;
+        if (systemPromptExtras && !sdkSessionId) {
+          promptAppend = promptAppend + '\n\n' + systemPromptExtras;
+        }
         queryOptions.systemPrompt = {
           type: 'preset',
           preset: 'claude_code',
-          append: agentDef.prompt + '\n\n' + runtimeBlock,
+          append: promptAppend,
         };
         if (agentDef.model) queryOptions.model = agentDef.model;
         console.log(`[chat-bridge] Loaded agent "${agentName}" via systemPrompt.append (${agentDef.prompt.length} chars, model: ${agentDef.model || 'inherit'})`);
@@ -268,7 +495,7 @@ class ChatBridge {
       }
       return new Promise((resolve) => {
         if (!currentSession.pendingApprovals) currentSession.pendingApprovals = new Map();
-        currentSession.pendingApprovals.set(requestId, resolve);
+        currentSession.pendingApprovals.set(requestId, { resolve, toolInput: input });
         if (onMessage) {
           onMessage({
             type: 'permission_request',
@@ -283,7 +510,7 @@ class ChatBridge {
 
     queryOptions.canUseTool = async (toolName, input, sdkOptions) => {
       if (readTrustMode() || AUTO_APPROVE.has(toolName)) {
-        return { behavior: 'allow' };
+        return { behavior: 'allow', updatedInput: input ?? {} };
       }
       const requestId = sdkOptions.toolUseID || `req-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       return requestApprovalFromUser(toolName, input, requestId, null);
@@ -439,8 +666,8 @@ class ChatBridge {
     session.active = false;
     // Deny all pending approval requests so awaiting canUseTool promises resolve.
     if (session.pendingApprovals && session.pendingApprovals.size > 0) {
-      for (const resolve of session.pendingApprovals.values()) {
-        resolve({ behavior: 'deny', message: 'Session stopped by user.' });
+      for (const entry of session.pendingApprovals.values()) {
+        entry.resolve({ behavior: 'deny', message: 'Session stopped by user.' });
       }
       session.pendingApprovals.clear();
     }
@@ -451,6 +678,10 @@ class ChatBridge {
     return { sdkSessionId };
   }
 
+  getSession(sessionId) {
+    return this.sessions.get(sessionId);
+  }
+
   /**
    * Resolve a pending tool approval request.
    * Called by server.js when the user clicks Allow/Deny in the UI.
@@ -458,12 +689,12 @@ class ChatBridge {
   respondToApproval(sessionId, requestId, approved) {
     const session = this.sessions.get(sessionId);
     if (!session?.pendingApprovals) return false;
-    const resolve = session.pendingApprovals.get(requestId);
-    if (!resolve) return false;
+    const entry = session.pendingApprovals.get(requestId);
+    if (!entry) return false;
     session.pendingApprovals.delete(requestId);
-    resolve(
+    entry.resolve(
       approved
-        ? { behavior: 'allow' }
+        ? { behavior: 'allow', updatedInput: entry.toolInput ?? {} }
         : { behavior: 'deny', message: 'User denied this tool use.' }
     );
     return true;

@@ -203,10 +203,3 @@ The "Skipped" block is mandatory — it gives visibility on questions the commun
 - **Tags in comments** — keep HTML comment tags for easy searching
 - **Keep organized** — categories in logical order (installation -> config -> integrations -> product -> billing -> errors)
 
-
-### Notify via Telegram
-
-Upon completion, send a short summary via Telegram to the user:
-- Use the Telegram MCP: `reply(chat_id="YOUR_CHAT_ID", text="...")`
-- Format: emoji + routine name + main result (1-3 lines)
-- If the routine had no updates, send anyway with "no updates"

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import {
   FileText,
   Clock,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react'
 import { api } from '../lib/api'
 import HealthBadge from '../components/HealthBadge'
+import PluginWidgetsGrid from '../components/PluginWidgetsGrid'
 
 interface OverviewData {
   metrics: {
@@ -210,6 +212,7 @@ const QUICK_ACTIONS = [
 
 // --- Main Component ---
 export default function Overview() {
+  const { t } = useTranslation()
   const [data, setData] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -258,8 +261,8 @@ export default function Overview() {
     <div className="max-w-[1400px] mx-auto">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-[#e6edf3] tracking-tight">Overview</h1>
-        <p className="text-[#667085] text-sm mt-1">Workspace dashboard</p>
+        <h1 className="text-2xl font-bold text-[#e6edf3] tracking-tight">{t('overview.title')}</h1>
+        <p className="text-[#667085] text-sm mt-1">{t('overview.subtitle')}</p>
       </div>
 
       {/* Stat Cards */}
@@ -356,7 +359,7 @@ export default function Overview() {
               </div>
               Routines
             </h2>
-            <Link to="/routines" className="text-xs font-medium text-[#667085] hover:text-[#00FFA7] transition-colors flex items-center gap-1">
+            <Link to="/activity" className="text-xs font-medium text-[#667085] hover:text-[#00FFA7] transition-colors flex items-center gap-1">
               View all <ArrowRight size={12} />
             </Link>
           </div>
@@ -402,6 +405,9 @@ export default function Overview() {
           )}
         </div>
       </div>
+
+      {/* Plugin Widgets */}
+      <PluginWidgetsGrid mountPoint="overview" />
 
       {/* Quick Actions */}
       <div className="mb-4">

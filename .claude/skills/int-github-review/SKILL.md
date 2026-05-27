@@ -116,9 +116,7 @@ Create directory if it does not exist.
 - **Focus on action** — what needs the responsible person's attention, not just numbers
 
 
-### Notify via Telegram
+### Notification line
 
-Upon completion, send a short summary via Telegram to the user:
-- Use the Telegram MCP: `reply(chat_id="YOUR_CHAT_ID", text="...")`
-- Format: emoji + routine name + main result (1-3 lines)
-- If the routine had no updates, send anyway with "no updates"
+Write as the last line of your output:
+TELEGRAM_MSG: 🐙 GitHub Review [date] | [main result in 1 line]

@@ -3,6 +3,7 @@
 import os
 import sys
 import secrets
+import re
 from pathlib import Path
 from datetime import timedelta
 
@@ -20,27 +21,80 @@ load_dotenv(WORKSPACE / ".env")
 # Add social-auth to path
 sys.path.insert(0, str(WORKSPACE / "social-auth"))
 
+
+def _is_production() -> bool:
+    env = (
+        os.environ.get("EVONEXUS_ENV")
+        or os.environ.get("FLASK_ENV")
+        or os.environ.get("ENV")
+        or ""
+    ).strip().lower()
+    return env in {"production", "prod"}
+
+
+def _cors_allowed_origins():
+    raw = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+    if raw:
+        if raw == "*":
+            return "*"
+        origins = [origin.strip() for origin in re.split(r"[,\s]+", raw) if origin.strip()]
+        return origins or "*"
+    return "*" if not _is_production() else []
+
 app = Flask(__name__, static_folder=None)
 # Persist secret key so sessions survive restarts
 _secret_key = os.environ.get("EVONEXUS_SECRET_KEY")
 if not _secret_key:
+    if _is_production():
+        raise RuntimeError("EVONEXUS_SECRET_KEY must be set in production")
     _key_file = WORKSPACE / "dashboard" / "data" / ".secret_key"
     _key_file.parent.mkdir(parents=True, exist_ok=True)
     if _key_file.exists():
-        _secret_key = _key_file.read_text().strip()
+        _secret_key = _key_file.read_text(encoding="utf-8").strip()
     else:
         _secret_key = secrets.token_hex(32)
-        _key_file.write_text(_secret_key)
+        _key_file.write_text(_secret_key, encoding="utf-8")
         _key_file.chmod(0o600)
 
 app.secret_key = _secret_key
+
+# Generate BRAIN_REPO_MASTER_KEY if not set (Fernet key for encrypting GitHub tokens)
+_brain_key = os.environ.get("BRAIN_REPO_MASTER_KEY")
+if not _brain_key:
+    _env_file = WORKSPACE / ".env"
+    try:
+        from cryptography.fernet import Fernet as _Fernet
+        _new_brain_key = _Fernet.generate_key().decode()
+        _env_lines = _env_file.read_text(encoding="utf-8").splitlines() if _env_file.exists() else []
+        _env_lines.append(f"BRAIN_REPO_MASTER_KEY={_new_brain_key}")
+        _env_file.write_text("\n".join(_env_lines) + "\n", encoding="utf-8")
+        os.environ["BRAIN_REPO_MASTER_KEY"] = _new_brain_key
+    except Exception as _bk_exc:
+        print(f"WARNING: Could not generate BRAIN_REPO_MASTER_KEY: {_bk_exc}")
+
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{WORKSPACE / 'dashboard' / 'data' / 'evonexus.db'}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["REMEMBER_COOKIE_DURATION"] = timedelta(days=30)
-CORS(app, origins=["http://localhost:5173"], supports_credentials=True)
+# SameSite=Strict prevents cross-origin cookie riding (CSRF defense layer 1).
+app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+
+# --- JSON encoding for API responses ---
+# With ensure_ascii=True (Flask default) jsonify escapes every non-ASCII
+# character as \uXXXX. JSON parsers in the browser decode this correctly,
+# but it clutters network logs and occasionally breaks naive consumers that
+# look at raw bytes (e.g. grep over nginx access logs). Emit real UTF-8 so
+# accented content ("João", "Mirandas Leilões") stays readable end-to-end.
+try:
+    app.json.ensure_ascii = False          # type: ignore[attr-defined]
+    app.json.mimetype = "application/json; charset=utf-8"  # type: ignore[attr-defined]
+except AttributeError:
+    # Flask <2.2 exposed this through app.config; keep compatibility.
+    app.config["JSON_AS_ASCII"] = False
+
+CORS(app, origins=_cors_allowed_origins(), supports_credentials=True)
 
 # --------------- Database ---------------
-from models import db, User, needs_setup, seed_roles, seed_systems
+from models import db, User, BrainRepoConfig, needs_setup, seed_roles, seed_systems
 db.init_app(app)
 
 # Create tables on first run + enable WAL mode for concurrent reads
@@ -194,45 +248,9 @@ with app.app_context():
         END;
     """)
     _conn.commit()
-    # Seed data if missions table is empty (guard on row count, not table existence)
-    _cur.execute("SELECT COUNT(*) FROM missions")
-    if _cur.fetchone()[0] == 0:
-        _now_seed = "2026-04-14T00:00:00.000000Z"
-        _cur.execute("""
-            INSERT INTO missions (slug, title, description, target_metric, target_value, current_value, due_date, status, created_at, updated_at)
-            VALUES ('evo-revenue-1m-q4-2026', 'Evolution Revenue $1M Q4 2026',
-                    'Atingir $1M de receita anual até o Q4 2026',
-                    'revenue_usd', 1000000, 0, '2026-12-31', 'active', ?, ?)
-        """, (_now_seed, _now_seed))
-        _mission_id = _cur.lastrowid
-        # Projects
-        for _slug, _title, _desc in [
-            ('evo-ai', 'Evo AI', 'CRM + AI agents — produto principal'),
-            ('evo-summit', 'Evolution Summit', 'Evento de lançamento (14-16 Abr 2026)'),
-            ('evo-academy', 'Evo Academy', 'Plataforma de cursos'),
-        ]:
-            _cur.execute("""
-                INSERT INTO projects (slug, mission_id, title, description, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'active', ?, ?)
-            """, (_slug, _mission_id, _title, _desc, _now_seed, _now_seed))
-        _conn.commit()
-        # Goals per project
-        _evo_ai_id = _cur.execute("SELECT id FROM projects WHERE slug='evo-ai'").fetchone()[0]
-        _summit_id = _cur.execute("SELECT id FROM projects WHERE slug='evo-summit'").fetchone()[0]
-        _academy_id = _cur.execute("SELECT id FROM projects WHERE slug='evo-academy'").fetchone()[0]
-        _goals_seed = [
-            ('evo-ai-100-customers', _evo_ai_id, '100 paying customers by Jun 30', 'customers', 'count', 100, '2026-06-30'),
-            ('evo-ai-billing-v2', _evo_ai_id, 'Ship billing v2', 'shipped', 'boolean', 1, '2026-05-31'),
-            ('evo-summit-200-tickets', _summit_id, 'Sell 200 tickets', 'tickets_sold', 'count', 200, '2026-04-13'),
-            ('evo-summit-3-sponsors', _summit_id, 'Close 3 sponsors', 'sponsors', 'count', 3, '2026-04-10'),
-            ('evo-academy-50-students', _academy_id, '50 beta students', 'students', 'count', 50, '2026-06-30'),
-        ]
-        for _gs in _goals_seed:
-            _cur.execute("""
-                INSERT INTO goals (slug, project_id, title, target_metric, metric_type, target_value, current_value, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 'active', ?, ?)
-            """, (_gs[0], _gs[1], _gs[2], _gs[3], _gs[4], _gs[5], _now_seed, _now_seed))
-        _conn.commit()
+    # No seed data — Goals start empty. Users create Mission → Project → Goal via UI
+    # or via the create-goal skill. Previous seed was Evolution-specific and leaked
+    # into fresh installations of open-source users.
     # --- End Goal Cascade migration ---
 
     # --- Tickets migration (Feature 1.3) ---
@@ -298,7 +316,292 @@ with app.app_context():
         _conn.commit()
     # --- End source attribution migration ---
 
+    # --- Thread-areas columns on tickets ---
+    _ticket_cols = {row[1] for row in _cur.execute("PRAGMA table_info(tickets)").fetchall()}
+    if "workspace_path" not in _ticket_cols:
+        _cur.execute("ALTER TABLE tickets ADD COLUMN workspace_path TEXT")
+        _conn.commit()
+    if "memory_md_path" not in _ticket_cols:
+        _cur.execute("ALTER TABLE tickets ADD COLUMN memory_md_path TEXT")
+        _conn.commit()
+    if "thread_session_id" not in _ticket_cols:
+        _cur.execute("ALTER TABLE tickets ADD COLUMN thread_session_id TEXT")
+        _conn.commit()
+    if "message_count" not in _ticket_cols:
+        _cur.execute("ALTER TABLE tickets ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0")
+        _conn.commit()
+    if "last_summary_at_message" not in _ticket_cols:
+        _cur.execute("ALTER TABLE tickets ADD COLUMN last_summary_at_message INTEGER NOT NULL DEFAULT 0")
+        _conn.commit()
+    # --- End thread-areas migration ---
+
+    # --- Plugin provenance: source_plugin on tables that plugins can seed ---
+    # When a plugin installs rows into projects/goals/missions/goal_tasks/
+    # tickets/triggers, the row gets tagged with its slug. Uninstall then
+    # deletes WHERE source_plugin = ? — user-created rows stay. Required for
+    # the `goals`, `tasks`, and `triggers` plugin capabilities (v1b).
+    for _tbl in ("tickets", "projects", "goals", "missions", "goal_tasks", "triggers"):
+        try:
+            _cols = {row[1] for row in _cur.execute(f"PRAGMA table_info({_tbl})").fetchall()}
+        except _sqlite3.OperationalError:
+            continue  # table doesn't exist yet in this build
+        if "source_plugin" not in _cols:
+            _cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN source_plugin TEXT")
+            _conn.commit()
+    # --- End plugin provenance migration ---
+
     # --- End tickets migration ---
+
+    # --- Knowledge connections migration (pgvector-knowledge feature) ---
+    _existing_tables3 = {row[0] for row in _cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "knowledge_connections" not in _existing_tables3:
+        _cur.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge_connections (
+                id TEXT PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                connection_string_encrypted BLOB,
+                host TEXT,
+                port INTEGER,
+                database_name TEXT,
+                username TEXT,
+                ssl_mode TEXT,
+                status TEXT DEFAULT 'disconnected',
+                schema_version TEXT,
+                pgvector_version TEXT,
+                postgres_version TEXT,
+                last_health_check TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_connection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id TEXT REFERENCES knowledge_connections(id) ON DELETE CASCADE,
+                event_type TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_kconn_status ON knowledge_connections(status);
+            CREATE INDEX IF NOT EXISTS idx_kconn_events_conn ON knowledge_connection_events(connection_id, created_at);
+        """)
+        _conn.commit()
+    # --- End knowledge connections migration ---
+
+    # --- Knowledge API keys migration (pgvector-knowledge Step 4) ---
+    _existing_tables4 = {row[0] for row in _cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "knowledge_api_keys" not in _existing_tables4:
+        _cur.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge_api_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                prefix TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                connection_id TEXT NOT NULL,
+                space_ids TEXT NOT NULL DEFAULT '[]',
+                scopes TEXT NOT NULL DEFAULT '["read"]',
+                rate_limit_per_min INTEGER NOT NULL DEFAULT 60,
+                rate_limit_per_day INTEGER NOT NULL DEFAULT 10000,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                expires_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_kak_prefix ON knowledge_api_keys(prefix);
+        """)
+        _conn.commit()
+    # --- End knowledge API keys migration ---
+
+    # --- Plugins migration (plugins-v1a) ---
+    _existing_tables5 = {row[0] for row in _cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "plugins_installed" not in _existing_tables5:
+        _cur.executescript("""
+            CREATE TABLE IF NOT EXISTS plugins_installed (
+                id TEXT PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                tier TEXT NOT NULL DEFAULT 'essential',
+                source_type TEXT,
+                source_url TEXT,
+                source_ref TEXT,
+                installed_at TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                manifest_json TEXT,
+                install_sha256 TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','disabled','broken','installing','uninstalling')),
+                last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS plugin_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plugin_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                payload TEXT,
+                success INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS plugin_hook_circuit_state (
+                plugin_slug TEXT NOT NULL,
+                handler_path TEXT NOT NULL,
+                failures_json TEXT NOT NULL DEFAULT '[]',
+                disabled_until TEXT,
+                total_invocations INTEGER NOT NULL DEFAULT 0,
+                total_failures INTEGER NOT NULL DEFAULT 0,
+                last_failure_at TEXT,
+                PRIMARY KEY (plugin_slug, handler_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_plugins_status ON plugins_installed(status);
+            CREATE INDEX IF NOT EXISTS idx_plugin_audit_plugin ON plugin_audit_log(plugin_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_hook_cb_disabled ON plugin_hook_circuit_state(disabled_until);
+        """)
+        _conn.commit()
+    # --- End plugins migration ---
+
+    # --- Brain Repo migration (brain-repo feature) ---
+    _user_cols = {row[1] for row in _cur.execute("PRAGMA table_info(users)").fetchall()}
+    if "onboarding_state" not in _user_cols:
+        _cur.execute("ALTER TABLE users ADD COLUMN onboarding_state TEXT")
+        _conn.commit()
+    if "onboarding_completed_agents_visit" not in _user_cols:
+        _cur.execute("ALTER TABLE users ADD COLUMN onboarding_completed_agents_visit INTEGER NOT NULL DEFAULT 0")
+        _conn.commit()
+    if "brain_repo_configs" not in _existing_tables:
+        _cur.executescript("""
+            CREATE TABLE IF NOT EXISTS brain_repo_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                github_token_encrypted BLOB,
+                repo_url TEXT,
+                repo_owner TEXT,
+                repo_name TEXT,
+                local_path TEXT,
+                last_sync TIMESTAMP,
+                sync_enabled INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                pending_count INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_brain_repo_user ON brain_repo_configs(user_id);
+        """)
+        _conn.commit()
+    # Async-sync job columns (v0.32+). Added after the table existed without them,
+    # so every column is an idempotent ALTER TABLE ADD.
+    _brain_cols = {row[1] for row in _cur.execute("PRAGMA table_info(brain_repo_configs)").fetchall()}
+    if "sync_in_progress" not in _brain_cols:
+        _cur.execute("ALTER TABLE brain_repo_configs ADD COLUMN sync_in_progress INTEGER NOT NULL DEFAULT 0")
+        _conn.commit()
+    if "sync_started_at" not in _brain_cols:
+        _cur.execute("ALTER TABLE brain_repo_configs ADD COLUMN sync_started_at TIMESTAMP")
+        _conn.commit()
+    if "sync_job_kind" not in _brain_cols:
+        _cur.execute("ALTER TABLE brain_repo_configs ADD COLUMN sync_job_kind TEXT")
+        _conn.commit()
+    if "cancel_requested" not in _brain_cols:
+        _cur.execute("ALTER TABLE brain_repo_configs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
+        _conn.commit()
+    # --- End Brain Repo migration ---
+
+    # --- Plugins Wave 1.1: per-capability toggle ---
+    # capabilities_disabled: JSON column storing which capabilities of a plugin
+    # are individually disabled (widgets, readonly_data, claude_hooks, skills,
+    # agents, commands, rules, routines). Heartbeats and triggers use their own
+    # `enabled` column instead — they are intentionally absent from this JSON.
+    _plugins_cols = {row[1] for row in _cur.execute("PRAGMA table_info(plugins_installed)").fetchall()}
+    if "capabilities_disabled" not in _plugins_cols:
+        _cur.execute(
+            "ALTER TABLE plugins_installed ADD COLUMN capabilities_disabled TEXT NOT NULL DEFAULT '{}'"
+        )
+        _conn.commit()
+
+    # source_plugin: tag heartbeats that were contributed by a plugin so the
+    # plugin detail page can filter them via GET /api/heartbeats?source_plugin=.
+    _hb_cols = {row[1] for row in _cur.execute("PRAGMA table_info(heartbeats)").fetchall()}
+    if "source_plugin" not in _hb_cols:
+        _cur.execute("ALTER TABLE heartbeats ADD COLUMN source_plugin TEXT")
+        _conn.commit()
+    # --- End Plugins Wave 1.1 migration ---
+
+    # --- Wave 2.5: plugin_scan_cache + plugin_audit_log tables ---
+    _existing_tables = {
+        row[0]
+        for row in _cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if "plugin_scan_cache" not in _existing_tables:
+        _cur.execute(
+            """CREATE TABLE plugin_scan_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tarball_sha256 TEXT NOT NULL,
+                scanner_version TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                findings_json TEXT NOT NULL DEFAULT '[]',
+                scanned_files INTEGER NOT NULL DEFAULT 0,
+                llm_augmented INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                UNIQUE(tarball_sha256, scanner_version)
+            )"""
+        )
+        _conn.commit()
+
+    if "plugin_audit_log" not in _existing_tables:
+        _cur.execute(
+            """CREATE TABLE plugin_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                event TEXT NOT NULL,
+                verdict TEXT,
+                actor_user_id INTEGER REFERENCES users(id),
+                actor_username TEXT,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )"""
+        )
+        _cur.execute("CREATE INDEX IF NOT EXISTS idx_plugin_audit_slug ON plugin_audit_log(slug)")
+        _conn.commit()
+    else:
+        # Wave 1 created plugin_audit_log with a different schema; add Wave 2.5
+        # columns idempotently if missing.
+        _pal_cols = {row[1] for row in _cur.execute("PRAGMA table_info(plugin_audit_log)").fetchall()}
+        if "slug" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN slug TEXT")
+            # Backfill from plugin_id for existing rows (Wave 1 schema)
+            if "plugin_id" in _pal_cols:
+                _cur.execute("UPDATE plugin_audit_log SET slug = plugin_id WHERE slug IS NULL")
+        if "event" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN event TEXT")
+            if "action" in _pal_cols:
+                _cur.execute("UPDATE plugin_audit_log SET event = action WHERE event IS NULL")
+        if "verdict" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN verdict TEXT")
+        if "actor_user_id" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN actor_user_id INTEGER")
+        if "actor_username" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN actor_username TEXT")
+        if "detail_json" not in _pal_cols:
+            _cur.execute("ALTER TABLE plugin_audit_log ADD COLUMN detail_json TEXT DEFAULT '{}'")
+            if "payload" in _pal_cols:
+                _cur.execute("UPDATE plugin_audit_log SET detail_json = COALESCE(payload, '{}') WHERE detail_json = '{}'")
+        _cur.execute("CREATE INDEX IF NOT EXISTS idx_plugin_audit_slug ON plugin_audit_log(slug)")
+        _conn.commit()
+    # --- End Wave 2.5 migration ---
+
+    # --- Wave 2.2r: integration_health_cache ---
+    _existing_tables_w22r = {
+        row[0]
+        for row in _cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if "integration_health_cache" not in _existing_tables_w22r:
+        _cur.execute(
+            """CREATE TABLE integration_health_cache (
+                plugin_slug TEXT NOT NULL,
+                integration_slug TEXT NOT NULL,
+                last_status TEXT,
+                last_checked_at TEXT,
+                last_error TEXT,
+                PRIMARY KEY (plugin_slug, integration_slug)
+            )"""
+        )
+        _conn.commit()
+    # --- End Wave 2.2r migration ---
 
     # Fix corrupted datetime columns (NULL or non-string values crash SQLAlchemy)
     for _tbl, _col in [("roles", "created_at"), ("users", "created_at"), ("users", "last_login")]:
@@ -312,6 +615,33 @@ with app.app_context():
     _conn.commit()
     _conn.close()
     # --- End auto-migrate ---
+
+    # --- Migration: providers.json schema normalization ---
+    # If the file exists but is missing the canonical keys
+    # ({active_provider, providers: {...}}), copy providers.example.json
+    # over it. This recovers from broken state left by older versions of
+    # the onboarding wizard that naively wrote {<id>: {api_key, enabled}}.
+    try:
+        _providers_file = WORKSPACE / "config" / "providers.json"
+        _providers_example = WORKSPACE / "config" / "providers.example.json"
+        if _providers_file.is_file():
+            try:
+                import json as _json
+                _data = _json.loads(_providers_file.read_text(encoding="utf-8"))
+                _ok = (
+                    isinstance(_data, dict)
+                    and "active_provider" in _data
+                    and isinstance(_data.get("providers"), dict)
+                )
+            except Exception:
+                _ok = False
+            if not _ok and _providers_example.is_file():
+                import shutil as _shutil
+                _shutil.copy2(_providers_example, _providers_file)
+                print("[migration] providers.json had invalid schema, restored from providers.example.json")
+    except Exception as _mig_exc:
+        print(f"[migration] providers.json normalization skipped: {_mig_exc}")
+    # --- End providers.json migration ---
 
     seed_roles()
     seed_systems()
@@ -333,6 +663,52 @@ with app.app_context():
         start_janitor_thread()
     except Exception as _tj_exc:
         print(f"WARNING: ticket janitor init failed: {_tj_exc}")
+
+    # Start Knowledge pool GC + health check threads
+    try:
+        from knowledge.connection_pool import start_gc_thread
+        from knowledge.health_check import start_health_check_thread
+        start_gc_thread()
+        start_health_check_thread(lambda: app)
+    except Exception as _kn_exc:
+        print(f"WARNING: knowledge background threads init failed: {_kn_exc}")
+
+    # Start knowledge usage janitor (delete usage rows > 7 days)
+    try:
+        from knowledge.usage_janitor import start_janitor_thread as start_usage_janitor
+        start_usage_janitor()
+    except Exception as _uj_exc:
+        print(f"WARNING: knowledge usage janitor init failed: {_uj_exc}")
+
+    # Start knowledge classify worker (async document classification — ADR-008)
+    try:
+        from knowledge.classify_worker import start_classify_worker
+        _sqlite_db_path = app.config["SQLALCHEMY_DATABASE_URI"].replace("sqlite:///", "")
+        start_classify_worker(_sqlite_db_path)
+    except Exception as _cw_exc:
+        print(f"WARNING: knowledge classify worker init failed: {_cw_exc}")
+
+    # --- Claude Code hooks bootstrap (plugins-v1a step 8) ---
+    # Idempotent: registers dispatcher for 4 v1a events in .claude/settings.json.
+    # Plugins are a core feature — no feature flag, runs unconditionally.
+    try:
+        from claude_hook_bootstrap import run as _bootstrap_hooks
+        _bootstrap_hooks()
+    except Exception as _hb_exc:
+        print(f"WARNING: claude_hook_bootstrap failed: {_hb_exc}")
+    # --- End Claude Code hooks bootstrap ---
+
+    # --- Plugin crash recovery (ADR-5) ---
+    # Detects orphaned .install-state.json files and rolls back incomplete installs.
+    try:
+        from plugin_install_state import crash_recovery_on_boot as _crash_recovery
+        _plugin_db_path = WORKSPACE / "dashboard" / "data" / "evonexus.db"
+        _recovery_log = _crash_recovery(_plugin_db_path)
+        if _recovery_log:
+            print(f"Plugin crash recovery: {len(_recovery_log)} actions taken")
+    except Exception as _cr_exc:
+        print(f"WARNING: plugin crash recovery failed: {_cr_exc}")
+    # --- End plugin crash recovery ---
 
     # Cleanup: remove old disabled share records (expired + disabled + older than 30 days)
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -367,6 +743,8 @@ PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/needs-setup",
     "/api/auth/setup",
+    "/api/health",
+    "/api/auth/needs-onboarding",
     "/api/config/workspace-status",
     "/api/version",
     "/api/version/check",
@@ -419,6 +797,7 @@ def auth_middleware():
         or path.startswith("/api/docs")
         or path.startswith("/api/triggers/webhook/")
         or (path.startswith("/api/shares/") and "/view" in path)
+        or path.startswith("/api/knowledge/v1/")
     ):
         return None
 
@@ -455,6 +834,7 @@ from routes.docs import bp as docs_bp
 from routes.mempalace import bp as mempalace_bp
 from routes.tasks import bp as tasks_bp
 from routes.triggers import bp as triggers_bp
+from routes.terminal_proxy import bp as terminal_proxy_bp, register_websocket_proxy as _register_terminal_ws
 from routes.backups import bp as backups_bp
 from routes.providers import bp as providers_bp
 from routes.settings import bp as settings_bp
@@ -462,6 +842,33 @@ from routes.shares import bp as shares_bp
 from routes.heartbeats import bp as heartbeats_bp
 from routes.goals import bp as goals_bp
 from routes.tickets import bp as tickets_bp
+from routes.health import bp as health_bp
+from routes.knowledge import bp as knowledge_bp
+from routes.knowledge_public import bp as knowledge_public_bp
+from routes.knowledge_proxy import bp as knowledge_proxy_bp
+from routes.knowledge_v1 import bp as knowledge_v1_bp
+from routes.databases import bp as databases_bp
+from routes.plugins import bp as plugins_bp
+from routes.mcp_servers import bp as mcp_servers_bp
+
+# Brain Repo + Onboarding blueprints (loaded after routes are created)
+try:
+    from routes.onboarding import bp as onboarding_bp
+    from routes.brain_repo import bp as brain_repo_bp
+    app.register_blueprint(onboarding_bp)
+    app.register_blueprint(brain_repo_bp)
+except ImportError:
+    pass  # Routes not yet created
+
+# Brain Repo watcher startup
+# Pass the app instance explicitly to avoid the circular `from app import app`
+# that triggered "Flask app is not registered with this 'SQLAlchemy' instance"
+# on every boot, leaving auto-sync permanently off.
+try:
+    from brain_repo.watcher import start_brain_watcher
+    start_brain_watcher(WORKSPACE, flask_app=app)
+except Exception as _bw_exc:
+    pass  # Brain watcher starts only when a brain repo is configured
 
 app.register_blueprint(overview_bp)
 app.register_blueprint(workspace_bp)
@@ -481,6 +888,25 @@ app.register_blueprint(docs_bp)
 app.register_blueprint(mempalace_bp)
 app.register_blueprint(tasks_bp)
 app.register_blueprint(triggers_bp)
+app.register_blueprint(terminal_proxy_bp)
+
+# Mount the terminal-server WebSocket proxy on the same Sock instance the
+# rest of the app uses. Done after the blueprint is registered so route
+# names are unique. Without this, browsers connecting from a host other
+# than the one running the Node terminal-server (LAN, Tailscale Funnel,
+# SSH tunnel without the dynamic port forwarded) cannot reach it directly
+# due to CORS preflight + private-network-access policies.
+try:
+    from flask_sock import Sock as _Sock
+    _terminal_sock = _Sock(app)
+    _register_terminal_ws(_terminal_sock)
+except Exception as _exc:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "terminal_proxy: failed to mount WebSocket proxy: %s — terminal "
+        "interactions will require direct access to the terminal-server port.",
+        _exc,
+    )
 app.register_blueprint(backups_bp)
 app.register_blueprint(providers_bp)
 app.register_blueprint(settings_bp)
@@ -488,6 +914,14 @@ app.register_blueprint(shares_bp)
 app.register_blueprint(heartbeats_bp)
 app.register_blueprint(goals_bp)
 app.register_blueprint(tickets_bp)
+app.register_blueprint(health_bp)
+app.register_blueprint(knowledge_bp)
+app.register_blueprint(knowledge_public_bp)
+app.register_blueprint(knowledge_proxy_bp)
+app.register_blueprint(knowledge_v1_bp)
+app.register_blueprint(databases_bp)
+app.register_blueprint(plugins_bp)
+app.register_blueprint(mcp_servers_bp)
 
 # --------------- Social Auth blueprints ---------------
 from auth.youtube import bp as youtube_auth_bp
@@ -631,7 +1065,7 @@ if __name__ == "__main__":
         import yaml
         config_path = WORKSPACE / "config" / "workspace.yaml"
         if config_path.is_file():
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f)
             if cfg and cfg.get("port"):
                 port = int(cfg["port"])
@@ -681,4 +1115,8 @@ if __name__ == "__main__":
     task_thread = threading.Thread(target=_poll_scheduled_tasks, daemon=True, name="task-poller")
     task_thread.start()
 
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Dev mode: EVONEXUS_DEV=1 enables Flask's auto-reloader so edits to
+    # dashboard/backend/*.py take effect without a manual restart. Disabled by
+    # default — production runs with a fixed process managed by systemd/docker.
+    dev_mode = os.getenv("EVONEXUS_DEV") == "1"
+    app.run(host="0.0.0.0", port=port, debug=dev_mode, use_reloader=dev_mode)

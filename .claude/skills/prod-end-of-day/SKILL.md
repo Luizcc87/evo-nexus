@@ -72,7 +72,10 @@ The log should include:
 
 ## Step 5 — Organize tasks
 
-Run `/prod-review-todoist` to ensure tasks created during the day are categorized and translated.
+Review Todoist tasks directly (do NOT invoke `/prod-review-todoist` as a sub-skill — it sends a duplicate Telegram notification):
+- Run `todoist today` to list today's tasks
+- For each uncategorized or non-PT-BR task: rename/recategorize via `todoist update`
+- Report how many were organized
 
 ## Step 6 — Confirm
 
@@ -90,10 +93,3 @@ Present a short summary:
 **Tomorrow:** {sentence about where to resume}
 ```
 
-
-### Notify via Telegram
-
-Upon completion, send a short summary via Telegram to the user:
-- Use the Telegram MCP: `reply(chat_id="YOUR_CHAT_ID", text="...")`
-- Format: emoji + routine name + main result (1-3 lines)
-- If the routine had no updates, send anyway with "no updates"

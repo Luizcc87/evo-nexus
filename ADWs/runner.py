@@ -291,10 +291,59 @@ def run_claude(prompt: str, log_name: str = "unnamed", timeout: int = 600, agent
         return {"success": False, "stdout": "", "stderr": str(e), "returncode": -3, "duration": duration}
 
 
-def run_skill(skill_name: str, args: str = "", log_name: str = None, timeout: int = 600, agent: str = None) -> dict:
-    """Execute a skill via CLI, optionally with an agent."""
+def run_skill(
+    skill_name: str,
+    args: str = "",
+    log_name: str = None,
+    timeout: int = 600,
+    agent: str = None,
+    notify_telegram: bool | str = False,
+) -> dict:
+    """Execute a skill via CLI, optionally with an agent.
+
+    Args:
+        notify_telegram: Controls post-skill Telegram notification.
+            False (default) — no notification.
+            True            — Python sends ONE Telegram after the skill; reads
+                              chat_id from TELEGRAM_CHAT_ID env var.
+            "<chat_id>"     — same as True but overrides the chat_id.
+
+    The agent is asked to output a line "TELEGRAM_MSG: <text>" in its stdout.
+    Python reads that line and calls send_telegram() exactly once.
+    The agent NEVER calls the Telegram MCP tool directly.
+    """
+    chat_id = None
+    if notify_telegram:
+        chat_id = (
+            notify_telegram
+            if isinstance(notify_telegram, str)
+            else os.environ.get("TELEGRAM_CHAT_ID", "")
+        ) or None
+
     prompt = f"Execute the skill /{skill_name} {args}".strip()
-    return run_claude(prompt, log_name or skill_name, timeout, agent=agent)
+    if chat_id:
+        prompt += (
+            f"\n\n---\n"
+            f"Ao finalizar, escreva na última linha do output:\n"
+            f"TELEGRAM_MSG: [emoji] [nome da rotina] [data] | [resultado 1] | [resultado 2]\n"
+            f"Apenas UMA linha TELEGRAM_MSG:. NÃO use a ferramenta Telegram/reply — "
+            f"o sistema Python lê essa linha e envia a notificação automaticamente.\n"
+            f"---"
+        )
+
+    result = run_claude(prompt, log_name or skill_name, timeout, agent=agent)
+
+    if chat_id and result.get("returncode", -1) == 0:
+        stdout = result.get("stdout", "")
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if line.startswith("TELEGRAM_MSG:"):
+                msg = line[len("TELEGRAM_MSG:"):].strip()
+                if msg:
+                    send_telegram(msg, chat_id=chat_id)
+                break  # only ever send one message
+
+    return result
 
 
 def run_script(func, log_name: str = "unnamed", timeout: int = 120) -> dict:
@@ -393,3 +442,34 @@ def summary(results: list, title: str = "Completed"):
         border_style="green" if failed == 0 else "yellow",
         padding=(0, 2)
     ))
+
+
+def send_telegram(text: str, chat_id: str = None) -> bool:
+    """Send a Telegram message via bot API (no MCP dependency).
+
+    Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from environment.
+    Returns True if sent successfully, False otherwise.
+    """
+    import urllib.request
+    import urllib.parse
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    cid = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not cid:
+        console.print("  [warning]⚠ Telegram not configured (missing BOT_TOKEN or CHAT_ID)[/warning]")
+        return False
+
+    try:
+        payload = urllib.parse.urlencode({"chat_id": cid, "text": text, "parse_mode": "HTML"}).encode()
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        req = urllib.request.Request(url, data=payload, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            ok = resp.status == 200
+        if ok:
+            console.print("  [success]✓[/success] Telegram enviado")
+        else:
+            console.print(f"  [warning]⚠ Telegram status {resp.status}[/warning]")
+        return ok
+    except Exception as e:
+        console.print(f"  [warning]⚠ Telegram error: {e}[/warning]")
+        return False

@@ -184,14 +184,13 @@ When finished, present a short summary:
 
 Without listing tasks one by one — just counts. If the user wants details, they ask.
 
-### Step 9 — Notify via Telegram
+### Step 9 — Notification line
 
-Send the Step 8 summary via Telegram to the user using the `/int-telegram` skill:
-- Chat ID: `YOUR_CHAT_ID`
-- Use `reply(chat_id="YOUR_CHAT_ID", text="...")` via MCP
-- Short format: emoji + title + meeting and task count
+Only if at least one new meeting was processed, write this as the last line of your output:
 
-If there are no new meetings (stopped at Step 2), do **NOT** send any Telegram message — stay silent. Only notify when at least one new meeting was processed.
+TELEGRAM_MSG: 🎙️ Sync Fathom — N reunião(ões) processada(s) | N tarefas criadas
+
+If no new meetings were processed (stopped at Step 2), do NOT write a TELEGRAM_MSG line.
 
 ## Notes
 

@@ -51,6 +51,7 @@ RUN cd dashboard/terminal-server && npm install
 COPY dashboard/docker-start.sh dashboard/docker-start.sh
 COPY social-auth/ social-auth/
 COPY scheduler.py ./
+COPY .claude/ ./.claude/
 
 # Copy built frontend from stage 1
 COPY --from=frontend-build /frontend/dist dashboard/frontend/dist

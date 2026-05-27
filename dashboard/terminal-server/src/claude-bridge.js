@@ -70,9 +70,12 @@ class ClaudeBridge {
           delete envVars['OPENAI_API_KEY'];
           console.log('[provider] codex_auth active — stripping OPENAI_API_KEY, OpenClaude will use ~/.codex/auth.json');
         }
-        const codexAuthPath = path.join(process.env.HOME || '/', '.codex', 'auth.json');
+        const homeDir = process.env.HOME || process.env.USERPROFILE || '/';
+        const codexAuthPath = path.join(homeDir, '.codex', 'auth.json');
         if (!fs.existsSync(codexAuthPath)) {
-          console.warn('[provider] codex_auth active but ~/.codex/auth.json is missing — run OAuth login in the Providers page');
+          console.warn(`[provider] codex_auth active but auth.json is missing at ${codexAuthPath} — run OAuth login in the Providers page`);
+        } else {
+          console.log(`[provider] Found Codex auth at: ${codexAuthPath}`);
         }
       }
 
@@ -80,7 +83,9 @@ class ClaudeBridge {
       if (Object.keys(envVars).length > 0) {
         console.log(`[provider] Injecting env vars: ${Object.keys(envVars).join(', ')}`);
       }
-      return { cli_command: cliCommand, env_vars: envVars, active };
+      const result = { cli_command: cliCommand, env_vars: envVars, active };
+      console.log(`[provider] Resolved config V2: ${JSON.stringify(result)}`);
+      return result;
     } catch (err) {
       console.warn(`[provider] Could not read providers.json: ${err.message}`);
       return { cli_command: 'claude', env_vars: {}, active: 'anthropic' };
@@ -89,51 +94,53 @@ class ClaudeBridge {
 
   findClaudeCommand(cliCommand = 'claude') {
     const { execSync } = require('child_process');
+    const isWindows = process.platform === 'win32';
 
-    // Use shell-based `which` to resolve with full PATH (incl. nvm, fnm, etc.)
-    // Hardcoded dispatch to satisfy semgrep — each branch is a literal string
+    // 1) Try environment/PATH resolution
     try {
       let resolved;
-      if (cliCommand === 'openclaude') {
-        resolved = execSync('which openclaude', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      } else {
-        resolved = execSync('which claude', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      }
-      if (resolved) {
+      const whichCmd = isWindows ? 'where.exe' : 'which';
+      resolved = execSync(`${whichCmd} ${cliCommand}`, {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore']
+      }).split(/\r?\n/)[0].trim(); // where.exe can return multiple lines
+
+      if (resolved && fs.existsSync(resolved)) {
         console.log(`[provider] Found ${cliCommand} at: ${resolved}`);
         return resolved;
       }
-    } catch {
-      // which failed — try hardcoded paths below
+    } catch (err) {
+      // which/where failed — continue to hardcoded paths
     }
 
-    // Fallback: check common hardcoded paths
-    const home = process.env.HOME || '/';
-    const paths = cliCommand === 'openclaude'
+    // 2) Try hardcoded platform-specific paths
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '/';
+    const appData = process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
+
+    const paths = isWindows
       ? [
-          path.join(home, '.local', 'bin', 'openclaude'),
-          '/usr/local/bin/openclaude',
-          '/usr/bin/openclaude',
+          path.join(appData, 'npm', `${cliCommand}.cmd`),
+          path.join(appData, 'npm', `${cliCommand}.ps1`),
+          path.join(homeDir, '.local', 'bin', `${cliCommand}.cmd`),
         ]
       : [
-          path.join(home, '.claude', 'local', 'claude'),
-          path.join(home, '.local', 'bin', 'claude'),
-          '/usr/local/bin/claude',
-          '/usr/bin/claude',
+          path.join(homeDir, '.local', 'bin', cliCommand),
+          `/usr/local/bin/${cliCommand}`,
+          `/usr/bin/${cliCommand}`,
         ];
 
     for (const p of paths) {
       try {
         if (fs.existsSync(p)) {
-          console.log(`[provider] Found ${cliCommand} at hardcoded path: ${p}`);
+          console.log(`[provider] Found ${cliCommand} at path: ${p}`);
           return p;
         }
-      } catch {
+      } catch (e) {
         continue;
       }
     }
 
-    console.error(`[provider] ${cliCommand} not found anywhere, using bare command name`);
+    console.error(`[provider] ${cliCommand} not found in PATH or common locations, using bare command name: ${cliCommand}`);
     return cliCommand;
   }
 
@@ -168,8 +175,8 @@ class ClaudeBridge {
 
       const cliCommand = this.findClaudeCommand(providerConfig.cli_command);
 
-      console.log(`Starting session ${sessionId} with ${providerConfig.cli_command}`);
-      console.log(`Command: ${cliCommand}`);
+      console.log(`Starting session ${sessionId} with provider ${providerConfig.active} (command: ${providerConfig.cli_command})`);
+      console.log(`Resolved Command Path: ${cliCommand}`);
       console.log(`Working directory: ${workingDir}`);
       console.log(`Agent: ${agent || 'none'}`);
       console.log(`Terminal size: ${cols}x${rows}`);
@@ -242,8 +249,8 @@ class ClaudeBridge {
       // For the plain 'openai' provider (API key mode), default to gpt-4.1.
       if (!providerEnv['OPENAI_MODEL']) {
         if (active === 'codex_auth') {
-          providerEnv['OPENAI_MODEL'] = 'codexplan';
-          console.log('[provider] OPENAI_MODEL not set — defaulting to codexplan (Codex OAuth)');
+          providerEnv['OPENAI_MODEL'] = 'gpt-4o';
+          console.log('[provider] OPENAI_MODEL not set — defaulting to gpt-4o (Codex OAuth)');
         } else if (active === 'openai') {
           providerEnv['OPENAI_MODEL'] = 'gpt-4.1';
           console.log('[provider] OPENAI_MODEL not set — defaulting to gpt-4.1');

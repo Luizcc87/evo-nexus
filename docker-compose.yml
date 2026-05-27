@@ -20,6 +20,8 @@ services:
       - /workspace/dashboard/terminal-server/node_modules
       - ./memory:/workspace/memory
       - ./ADWs/logs:/workspace/ADWs/logs
+      - ./.claude:/workspace/.claude
+      - ${USERPROFILE:-~}/.codex:/root/.codex
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/version"]
@@ -48,6 +50,7 @@ services:
       - memory:/workspace/memory
       - adw-logs:/workspace/ADWs/logs
       - agent-memory:/workspace/.claude/agent-memory
+      - ${USERPROFILE:-~}/.codex:/root/.codex
     restart: unless-stopped
     stdin_open: true
     tty: true
@@ -72,6 +75,7 @@ services:
       - memory:/workspace/memory
       - adw-logs:/workspace/ADWs/logs
       - agent-memory:/workspace/.claude/agent-memory
+      - ${USERPROFILE:-~}/.codex:/root/.codex
     profiles:
       - manual
 

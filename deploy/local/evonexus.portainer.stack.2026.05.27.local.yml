@@ -7,16 +7,17 @@
 ## - Cloudflare Tunnel in front of Traefik
 ##
 ## Before deploy:
-## - replace evonexus.l2csolucoes.com.br with your real hostname
+## - replace nexus.example.com with your real hostname
 ## - fill the credential values below
 ## - confirm the Traefik certresolver name
 ## - in Cloudflare Tunnel, point the same hostname to Traefik
-##   example: evonexus.l2csolucoes.com.br -> http://localhost:80
+##   example: nexus.example.com -> http://localhost:80
 ## ============================================================================
 version: "3.7"
 
 services:
-  dashboard:
+
+  evonexus_dashboard:
     image: lc1868/evo-nexus-dashboard:latest
 
     volumes:
@@ -85,17 +86,17 @@ services:
         - traefik.enable=1
         - traefik.docker.network=network_swarm_public
         ## Public route:
-        ##   https://evonexus.l2csolucoes.com.br            -> dashboard on :8080
-        ##   https://evonexus.l2csolucoes.com.br/terminal   -> terminal on :32352
-        - traefik.http.routers.evonexus_dashboard.rule=Host(`evonexus.l2csolucoes.com.br`)
-        - traefik.http.routers.evonexus_dashboard.entrypoints=web,websecure
+        ##   https://nexus.example.com            -> dashboard on :8080
+        ##   https://nexus.example.com/terminal   -> terminal on :32352
+        - traefik.http.routers.evonexus_dashboard.rule=Host(`nexus.example.com`)
+        - traefik.http.routers.evonexus_dashboard.entrypoints=websecure
         - traefik.http.routers.evonexus_dashboard.priority=1
         - traefik.http.routers.evonexus_dashboard.tls.certresolver=letsencryptresolver
         - traefik.http.routers.evonexus_dashboard.service=evonexus_dashboard
         - traefik.http.services.evonexus_dashboard.loadbalancer.server.port=8080
         - traefik.http.services.evonexus_dashboard.loadbalancer.passHostHeader=true
-        - traefik.http.routers.evonexus_terminal.rule=Host(`evonexus.l2csolucoes.com.br`) && PathPrefix(`/terminal`)
-        - traefik.http.routers.evonexus_terminal.entrypoints=web,websecure
+        - traefik.http.routers.evonexus_terminal.rule=Host(`nexus.example.com`) && PathPrefix(`/terminal`)
+        - traefik.http.routers.evonexus_terminal.entrypoints=websecure
         - traefik.http.routers.evonexus_terminal.priority=10
         - traefik.http.routers.evonexus_terminal.tls.certresolver=letsencryptresolver
         - traefik.http.routers.evonexus_terminal.service=evonexus_terminal
@@ -104,7 +105,7 @@ services:
         - traefik.http.services.evonexus_terminal.loadbalancer.server.port=32352
         - traefik.http.services.evonexus_terminal.loadbalancer.passHostHeader=true
 
-  telegram:
+  evonexus_telegram:
     image: lc1868/evo-nexus-runtime:latest
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
     command:
@@ -176,7 +177,7 @@ services:
           cpus: "1"
           memory: 1024M
 
-  scheduler:
+  evonexus_scheduler:
     image: lc1868/evo-nexus-runtime:latest
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
     command: ["uv", "run", "python", "scheduler.py"]
